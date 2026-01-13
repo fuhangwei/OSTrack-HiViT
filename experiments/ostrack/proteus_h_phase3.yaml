@@ -1,0 +1,100 @@
+DATA:
+  MAX_SAMPLE_INTERVAL: 200
+  MEAN: [0.485, 0.456, 0.406]
+  STD: [0.229, 0.224, 0.225]
+  SAMPLER_MODE: causal
+  TRAIN:
+    # 【修改1】数据集必须与 Phase 1 保持一致！
+    # 如果 Phase 3 突然去掉了 TrackingNet 或用了小版 GOT，模型会“遗忘”之前学到的野外抗干扰能力。
+    DATASETS_NAME:
+    - LASOT
+    - GOT10K_train_full   # 必须是 train_full，不要退回 vottrain
+    - COCO17
+    - TRACKINGNET         # 加上这个！虽然我们只下了 TRAIN_0，但代码会自动处理
+    DATASETS_RATIO:
+    - 1
+    - 1
+    - 1
+    - 1
+    SAMPLE_PER_EPOCH: 60000
+  VAL:
+    DATASETS_NAME:
+    - GOT10K_votval
+    DATASETS_RATIO:
+    - 1
+    SAMPLE_PER_EPOCH: 1000
+  SEARCH:
+    SIZE: 256
+    FACTOR: 4.0
+    CENTER_JITTER: 3
+    SCALE_JITTER: 0.25
+  TEMPLATE:
+    SIZE: 128
+    FACTOR: 2.0
+    CENTER_JITTER: 0
+    SCALE_JITTER: 0
+
+MODEL:
+  BACKBONE:
+    TYPE: hivit_base
+    STRIDE: 16
+    CAT_MODE: direct
+  HEAD:
+    TYPE: CENTER
+    NUM_CHANNELS: 256
+
+  # 【修改2】路径确认
+  # 确保这个路径指向你 Phase 1 跑出来的那个 0.86+ 的权重
+  # 如果你做了备份，这里可以写 "Phase1_Final_Best.pth" 的绝对路径
+  PRETRAIN_FILE: "output/phase1_full/checkpoints/train/ostrack/hivit_base_256/ProTeusH_ep0300.pth.tar"
+
+  # Mamba 权重路径
+  MAMBA_PRETRAIN_FILE: "pretrained_models/mamba_phase2.pth"
+
+TRAIN:
+#  LR: 0.0001              # 低学习率微调 (Phase 1 是 0.0004)
+  WEIGHT_DECAY: 0.0001
+  EPOCH: 60
+  LR_DROP_EPOCH: 45
+
+  # 【修改3】显存安全警报
+  # Phase 3 增加了 Mamba + UOT 模块，且 AMP: False 极其吃显存。
+  # 4090D (24G) 跑 32 必爆！必须降回 16。
+  BATCH_SIZE: 16
+
+  NUM_WORKER: 8
+  OPTIMIZER: ADAMW
+#  BACKBONE_MULTIPLIER: 0.01  # 骨干仅仅微调
+  GIOU_WEIGHT: 2.0
+  L1_WEIGHT: 5.0
+  GRAD_CLIP_NORM: 0.1
+  PRINT_INTERVAL: 50
+  VAL_EPOCH_INTERVAL: 5
+
+  # 保持 False 防止 Sinkhorn 出现 NaN
+  AMP: False
+  DROP_PATH_RATE: 0.1
+
+  # Phase 3 核心逻辑
+    # 【必杀技 3】: 策略大调整
+
+    # 1. 立即解冻 (全员下场，不再等待)
+  UNFREEZE_EPOCH: 0
+
+    # 2. 降低 Mamba 约束 (只让它当辅助，别当主力)
+  REG_WEIGHT: 1  # 从 0.5 降到 0.05
+
+  # 3. 极度保护 Backbone (防止被带偏)
+  LR: 0.0001
+  BACKBONE_MULTIPLIER: 0.001  # 从 0.01 再降 10 倍！
+
+  SCHEDULER:
+    TYPE: step
+    DECAY_RATE: 0.1
+
+TEST:
+  EPOCH: 60
+  SEARCH_FACTOR: 4.0
+  SEARCH_SIZE: 256
+  TEMPLATE_FACTOR: 2.0
+  TEMPLATE_SIZE: 128

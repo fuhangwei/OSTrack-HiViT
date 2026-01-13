@@ -1,0 +1,72 @@
+DATA:
+  MAX_SAMPLE_INTERVAL: 200
+  MEAN: [0.485, 0.456, 0.406]
+  STD: [0.229, 0.224, 0.225]
+  SAMPLER_MODE: causal
+  TRAIN:
+    DATASETS_NAME:
+    - LASOT
+    - GOT10K_train_full              # 【修改1】确认使用全量训练集 vtrain (而非 vot 子集)
+    - COCO17
+    - TRACKINGNET                 # 【修改2】必须加入 TrackingNet！这是 SOTA 的关键
+    DATASETS_RATIO:
+    - 1
+    - 1
+    - 1
+    - 1                           # 对应 TrackingNet 的采样比例
+    SAMPLE_PER_EPOCH: 60000       # 全量数据采样数
+  VAL:
+    DATASETS_NAME:
+    - GOT10K_votval
+    DATASETS_RATIO: [1]
+    SAMPLE_PER_EPOCH: 1000
+  SEARCH:
+    SIZE: 256
+    FACTOR: 4.0
+    CENTER_JITTER: 3
+    SCALE_JITTER: 0.25
+  TEMPLATE:
+    SIZE: 128
+    FACTOR: 2.0
+    CENTER_JITTER: 0
+    SCALE_JITTER: 0
+
+MODEL:
+  BACKBONE:
+    TYPE: hivit_base
+    STRIDE: 16
+    CAT_MODE: direct
+  HEAD:
+    TYPE: CENTER
+    NUM_CHANNELS: 256
+  # 【修改3】这是重中之重！
+  # Phase 1 必须加载 ImageNet 预训练权重 (MAE格式)，绝对不能加载之前的跟踪模型
+  # 请确保你下载了官方的 hivit_base_224.pth (或 mae_pretrain_vit_base.pth)
+  PRETRAIN_FILE: hivit_base_224.pth
+
+TRAIN:
+  LR: 0.0004
+  WEIGHT_DECAY: 0.0001
+  EPOCH: 300                      # 【修改4】全量冲刺必须跑满 300 轮 (原 10 轮根本不够收敛)
+  LR_DROP_EPOCH: 240              # 在第 240 轮降低学习率
+  BATCH_SIZE: 32                  # 4090D 显存大，32 是安全且高效的
+  NUM_WORKER: 10                  # 【建议】4090D 计算太快，CPU读图需跟上，建议设为 8-10
+  OPTIMIZER: ADAMW
+  BACKBONE_MULTIPLIER: 0.1
+  GIOU_WEIGHT: 2.0
+  L1_WEIGHT: 5.0
+  GRAD_CLIP_NORM: 0.1
+  PRINT_INTERVAL: 50
+  VAL_EPOCH_INTERVAL: 20
+  AMP: False                       # 保持开启，4090D 跑 FP16 飞快
+  DROP_PATH_RATE: 0.1
+  SCHEDULER:
+    TYPE: step
+    DECAY_RATE: 0.1
+
+TEST:
+  EPOCH: 300
+  SEARCH_FACTOR: 4.0
+  SEARCH_SIZE: 256
+  TEMPLATE_FACTOR: 2.0
+  TEMPLATE_SIZE: 128
