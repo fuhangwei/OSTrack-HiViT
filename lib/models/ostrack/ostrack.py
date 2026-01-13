@@ -14,6 +14,8 @@ from lib.utils.box_ops import box_xyxy_to_cxcywh
 
 # lib/models/ostrack/ostrack.py
 
+# lib/models/ostrack/ostrack.py
+
 class ProTeusH(nn.Module):
     def __init__(self, transformer, box_head, head_type="CENTER"):
         super().__init__()
@@ -21,20 +23,24 @@ class ProTeusH(nn.Module):
         self.box_head = box_head
         self.head_type = head_type
 
-        # Phase 3 组件 (必须在这里定义，否则 forward 会报错)
+        # Phase 3 组件
         self.predictor = MambaPredictor(dim=512)
         self.observer = UOTObserver(dim=512)
         self.synergy = BayesianSynergy(dim=512)
 
-        # 🚀 [必须定义] 空间对齐与融合层
+        # 🚀 [核心补齐] 定义空间对齐层
         self.spatial_align = nn.MultiheadAttention(embed_dim=512, num_heads=8, batch_first=True)
-        # ⚠️ 注意：不要用 LayerNorm，改用简单的权重残差，保护视觉特征
         self.fusion_alpha = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, template, search, ce_template_mask=None, ce_keep_rate=None, prompt_history=None, **kwargs):
+        if head_type == "CORNER" or head_type == "CENTER":
+            self.feat_sz_s = int(box_head.feat_sz)
+            self.feat_len_s = int(box_head.feat_sz ** 2)
+
+    def forward(self, template: torch.Tensor, search: torch.Tensor, ce_template_mask=None, ce_keep_rate=None,
+                prompt_history=None, **kwargs):
         B = template.shape[0]
 
-        # 1. 获取 Anchor (保持不变)
+        # 1. Anchor 锁死
         with torch.no_grad():
             z_patch, _ = self.backbone.patch_embed(template)
             p_anchor = torch.mean(z_patch.reshape(B, -1, 512), dim=1, keepdim=True).detach()
@@ -43,31 +49,35 @@ class ProTeusH(nn.Module):
         if prompt_history is None:
             prompt_history = p_anchor.repeat(1, 16, 1)
             if self.training:
-                # 🚀 增加扰动噪声，让 Mamba 学会在噪声中保持鲁棒
+                # 🚀 增加扰动，让模型适应不完美的历史
                 prompt_history = prompt_history + torch.randn_like(prompt_history) * 0.05
 
         p_prior = self.predictor(prompt_history).unsqueeze(1)
 
-        # 3. 🚀 [修复定义错误] 定义 x_in 并输入 Backbone
-        # 必须模拟 OSTrack 的 concat 逻辑
-        from lib.utils.merge import merge_template_search
-        x_in, _ = merge_template_search(template, search, ce_template_mask, ce_keep_rate)
+        # 3. 🚀 [修复定义错误] 合并输入并输入 Backbone
+        # 必须模拟原版 OSTrack 的输入逻辑
+        if template.shape[2:] != search.shape[2:]:
+            # 如果尺寸不一致执行 Padding
+            padding_width = search.shape[3] - template.shape[3]
+            template_padded = F.pad(template, (0, padding_width, 0, 0))
+        else:
+            template_padded = template
+        x_in = torch.cat([template_padded, search], dim=2)
 
         results = self.backbone(x_in)
-        # 获取 Search 特征 (排除 Template tokens)
-        visual_feats = results[-1][:, -self.feat_len_s:]  # [B, N, 512]
+        # 提取 Search 部分的视觉特征
+        visual_feats = results[-1][:, -self.feat_len_s:]
 
         # 4. UOT + Synergy
         p_obs, confidence = self.observer(p_prior, visual_feats)
         p_next = self.synergy(p_anchor, p_prior, p_obs, confidence)
 
-        # 5. 🚀 [根本性修复] 空间注意力对齐
-        # 去掉之前的暴力 ResAdd，改用 MHA 让视觉 patch 自己去找时序对应关系
+        # 5. 🚀 [根本性修复] 空间注意力融合
         alpha = torch.tanh(self.fusion_alpha)
-        # visual_feats 做 Query, p_next 做 Key/Value
+        # 让视觉 patch 自己去检索相关的时序特征
         aligned_temporal, _ = self.spatial_align(visual_feats, p_next, p_next)
 
-        # 使用门控融合，不使用 LayerNorm 以免破坏 Backbone 分布
+        # 🛡️ 门控机制：不要加 LayerNorm，直接残差求和
         gate = alpha * torch.sigmoid(confidence)
         refined_feats = visual_feats + gate * aligned_temporal
 
