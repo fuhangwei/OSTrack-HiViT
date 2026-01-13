@@ -23,21 +23,21 @@ class ProTeusH(nn.Module):
         self.box_head = box_head
         self.head_type = head_type
 
-        # Phase 3 组件
+        # Phase 3 核心组件
         self.predictor = MambaPredictor(dim=512)
         self.observer = UOTObserver(dim=512)
         self.synergy = BayesianSynergy(dim=512)
 
-        # 🚀 [核心补齐] 定义空间对齐层
+        # 🚀 [核心补齐] 空间对齐层：解决全图污染问题
         self.spatial_align = nn.MultiheadAttention(embed_dim=512, num_heads=8, batch_first=True)
+        # 零初始化融合参数，保护视觉特征
         self.fusion_alpha = nn.Parameter(torch.tensor(0.0))
 
         if head_type == "CORNER" or head_type == "CENTER":
             self.feat_sz_s = int(box_head.feat_sz)
             self.feat_len_s = int(box_head.feat_sz ** 2)
 
-    def forward(self, template: torch.Tensor, search: torch.Tensor, ce_template_mask=None, ce_keep_rate=None,
-                prompt_history=None, **kwargs):
+    def forward(self, template, search, ce_template_mask=None, ce_keep_rate=None, prompt_history=None, **kwargs):
         B = template.shape[0]
 
         # 1. Anchor 锁死
@@ -45,28 +45,27 @@ class ProTeusH(nn.Module):
             z_patch, _ = self.backbone.patch_embed(template)
             p_anchor = torch.mean(z_patch.reshape(B, -1, 512), dim=1, keepdim=True).detach()
 
-        # 2. 模拟训练/推理分布一致性
+        # 2. 🚀 [修复断层] 对齐训练/推理分布
         if prompt_history is None:
             prompt_history = p_anchor.repeat(1, 16, 1)
+            # 训练时随机注入噪声，模拟推理时的不确定性
             if self.training:
-                # 🚀 增加扰动，让模型适应不完美的历史
-                prompt_history = prompt_history + torch.randn_like(prompt_history) * 0.05
+                noise = torch.randn_like(prompt_history) * 0.02
+                prompt_history = prompt_history + noise
 
         p_prior = self.predictor(prompt_history).unsqueeze(1)
 
-        # 3. 🚀 [修复定义错误] 合并输入并输入 Backbone
-        # 必须模拟原版 OSTrack 的输入逻辑
-        if template.shape[2:] != search.shape[2:]:
-            # 如果尺寸不一致执行 Padding
+        # 3. Backbone Inference (完整输入逻辑)
+        if template.shape[3] != search.shape[3]:
             padding_width = search.shape[3] - template.shape[3]
             template_padded = F.pad(template, (0, padding_width, 0, 0))
         else:
             template_padded = template
         x_in = torch.cat([template_padded, search], dim=2)
 
-        results = self.backbone(x_in)
-        # 提取 Search 部分的视觉特征
-        visual_feats = results[-1][:, -self.feat_len_s:]
+        results = self.backbone(x_in, ce_template_mask=ce_template_mask, ce_keep_rate=ce_keep_rate)
+        f3 = results[-1]
+        visual_feats = f3[:, -self.feat_len_s:]  # [B, N, 512]
 
         # 4. UOT + Synergy
         p_obs, confidence = self.observer(p_prior, visual_feats)
@@ -74,10 +73,10 @@ class ProTeusH(nn.Module):
 
         # 5. 🚀 [根本性修复] 空间注意力融合
         alpha = torch.tanh(self.fusion_alpha)
-        # 让视觉 patch 自己去检索相关的时序特征
+        # 让视觉 patch 检索时序特征，而非暴力全局求和
         aligned_temporal, _ = self.spatial_align(visual_feats, p_next, p_next)
 
-        # 🛡️ 门控机制：不要加 LayerNorm，直接残差求和
+        # 🛡️ 门控残差：如果置信度低（遮挡），gate 会自动缩小，保护视觉特征不被污染
         gate = alpha * torch.sigmoid(confidence)
         refined_feats = visual_feats + gate * aligned_temporal
 
