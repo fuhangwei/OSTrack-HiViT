@@ -45,10 +45,16 @@ class ProTeusH(nn.Module):
             p_anchor = p_anchor.detach()  # 🔒 锁死 Anchor
 
         # 2. Mamba Prediction
-        # 训练时只需给历史加极微小的噪声，或者干脆不加
+        # 在 ProTeusH.forward 中修改训练分支逻辑
         if prompt_history is None:
-            # Cold start: use anchor
+            # 模拟训练阶段
             prompt_history = p_anchor.repeat(1, 16, 1)
+
+            if self.training:
+                # 🚀 根本性改进：训练时引入 10% 的时序扰动噪声
+                # 强迫 Backbone 学会纠正那些“稍微有点偏”的时序特征，而不是只依赖完美的 anchor
+                noise = torch.randn_like(prompt_history) * 0.02
+                prompt_history = prompt_history + noise
 
         p_prior = self.predictor(prompt_history).unsqueeze(1)
 
@@ -66,18 +72,21 @@ class ProTeusH(nn.Module):
         visual_feats = f3.flatten(2).transpose(1, 2)
 
         # 4. UOT + Synergy
-        # Phase 3 全量微调时，visual_feats 参与计算，梯度会回传给 Backbone
-        p_obs, confidence = self.observer(p_prior, visual_feats)  # Visual feats act as memory
+        p_obs, confidence = self.observer(p_prior, visual_feats)
         p_next = self.synergy(p_anchor, p_prior, p_obs, confidence)
 
-        # 5. Fusion
+        # 5. 根本性融合重构：Uncertainty-Weighted Fusion
         alpha = torch.tanh(self.fusion_alpha)
 
-        # 广播 p_next 到每个像素
+        # 🚀 关键：利用 Synergy 计算出的 confidence (最优传输代价导出的置信度)
+        # 当观测与预测冲突很大时，confidence 趋于 0，自动关闭时序分支对视觉特征的影响
+        dynamic_alpha = alpha * torch.sigmoid(confidence)
+
         feat_scale = visual_feats.abs().mean().detach()
         p_next_scaled = F.normalize(p_next, dim=-1) * feat_scale
 
-        refined_feats = visual_feats + alpha * p_next_scaled
+        # 使用 dynamic_alpha 进行残差融合
+        refined_feats = visual_feats + dynamic_alpha * p_next_scaled
 
         out = self.forward_head(refined_feats)
 
@@ -121,23 +130,12 @@ def build_ostrack(cfg, training=True):
         new_dict = {}
         load_count = 0
 
-        # 在 lib/models/ostrack/ostrack.py 中搜索 build_ostrack 函数
-        # 找到加载权重的循环部分，修改为：
-
         for k, v in state_dict.items():
             k_clean = k.replace('module.', '')
             if k_clean in model_dict:
                 if v.shape == model_dict[k_clean].shape:
                     new_dict[k_clean] = v
                     load_count += 1
-                # --- 🚀 [新增] 针对 384 分辨率的位置编码自动插值 ---
-                elif 'pos_embed' in k_clean or 'relative_position_bias_table' in k_clean:
-                    print(f"  [Resize] Interpolating {k_clean}: {v.shape} -> {model_dict[k_clean].shape}")
-                    # 这里需要根据你的 HiViT 具体结构进行插值
-                    # 简单的做法是跳过加载，让模型使用 384 随机初始化的位置编码重新学习
-                    # 更好的做法是调用 torch.nn.functional.interpolate
-                    pass
-                    # ------------------------------------------------
 
         if load_count == 0:
             raise ValueError("!!! No weights loaded! Check your checkpoint path or keys!")

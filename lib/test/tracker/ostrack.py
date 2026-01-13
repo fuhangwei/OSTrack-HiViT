@@ -142,26 +142,23 @@ class OSTrack(BaseTracker):
         # ProTeus-H: 拼接历史
         history_tensor = torch.cat(self.prompt_history, dim=1).cuda()
 
+        # 修改 lib/test/tracker/ostrack.py 中的 track 函数
         with torch.no_grad():
-            out_dict = self.network(
-                template=self.z_dict1.tensors.cuda(),
-                search=search.tensors.cuda(),
-                ce_template_mask=self.box_mask_z,
-                prompt_history=history_tensor
-            )
+            out_dict = self.network(..., prompt_history=history_tensor)
 
-            # ProTeus-H: 更新历史 (逻辑重写)
-            # 修改 track 函数中的历史更新部分
             if 'p_obs' in out_dict:
-                # 获取当前帧的预测置信度（score_map 的最大值）
+                # 1. 提取当前帧的最高置信度
                 conf = out_dict['score_map'].max().item()
 
-                if conf > 0.5:
-                    # 置信度高，存入真实观测值
+                # 2. 根本性更新策略：Kalman-style Update
+                # 阈值 0.45 是 OSTrack 的目标存在分界点
+                if conf > 0.45:
+                    # 视觉可信：使用真实的视觉观测 p_obs 更新历史
                     current_feat = out_dict['p_obs'].detach()
                 else:
-                    # 置信度低（可能遮挡），存入 Mamba 的预测值 p_prior，或者保持上一帧
-                    # 这样可以防止背景噪声污染 Mamba 的记忆
+                    # 视觉失效（遮挡/消失）：严禁压入 p_obs！
+                    # 压入 Mamba 自己的预测 p_next，让模型基于“惯性”继续推演历史
+                    # 这能防止 Mamba 的状态空间（Hidden State）被背景特征污染
                     current_feat = out_dict['p_next'].detach()
 
                 self.prompt_history.append(current_feat)
