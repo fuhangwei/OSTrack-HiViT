@@ -151,15 +151,18 @@ class OSTrack(BaseTracker):
             )
 
             # ProTeus-H: 更新历史 (逻辑重写)
-            # 在 track 函数的更新历史部分
+            # 修改 track 函数中的历史更新部分
             if 'p_obs' in out_dict:
-                # 优先使用观测值（眼睛看到的），除非完全遮挡
-                current_feat = out_dict['p_obs'].detach()
+                # 获取当前帧的预测置信度（score_map 的最大值）
+                conf = out_dict['score_map'].max().item()
 
-                # 如果置信度太低（全遮挡），才考虑用预测值兜底
-                # 但为了稳健，SOTA 策略通常是：宁可信错眼睛，不信瞎猜的大脑
-                # 所以直接存 p_obs 往往效果最好，或者做一个加权
-                # current_feat = out_dict['p_obs'].detach() * 0.8 + out_dict['p_next'].detach() * 0.2
+                if conf > 0.5:
+                    # 置信度高，存入真实观测值
+                    current_feat = out_dict['p_obs'].detach()
+                else:
+                    # 置信度低（可能遮挡），存入 Mamba 的预测值 p_prior，或者保持上一帧
+                    # 这样可以防止背景噪声污染 Mamba 的记忆
+                    current_feat = out_dict['p_next'].detach()
 
                 self.prompt_history.append(current_feat)
                 self.prompt_history.pop(0)

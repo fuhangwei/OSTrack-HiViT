@@ -44,9 +44,6 @@ MODEL:
     TYPE: CENTER
     NUM_CHANNELS: 256
 
-  # 【修改2】路径确认
-  # 确保这个路径指向你 Phase 1 跑出来的那个 0.86+ 的权重
-  # 如果你做了备份，这里可以写 "Phase1_Final_Best.pth" 的绝对路径
   PRETRAIN_FILE: "output/phase1_full/checkpoints/train/ostrack/hivit_base_256/ProTeusH_ep0300.pth.tar"
 
   # Mamba 权重路径
@@ -56,12 +53,9 @@ TRAIN:
   LR: 0.00002             # 低学习率微调 (Phase 1 是 0.0004)
   WEIGHT_DECAY: 0.0001
   EPOCH: 20
-  LR_DROP_EPOCH: 45
+  LR_DROP_EPOCH: 15
 
-  # 【修改3】显存安全警报
-  # Phase 3 增加了 Mamba + UOT 模块，且 AMP: False 极其吃显存。
-  # 4090D (24G) 跑 32 必爆！必须降回 16。
-  BATCH_SIZE: 32
+  BATCH_SIZE: 48
 
   NUM_WORKER: 8
   OPTIMIZER: ADAMW
@@ -71,10 +65,8 @@ TRAIN:
   GRAD_CLIP_NORM: 0.1
   PRINT_INTERVAL: 50
   VAL_EPOCH_INTERVAL: 5
-  # 保持 False 防止 Sinkhorn 出现 NaN
   AMP: False
   DROP_PATH_RATE: 0.1
-    # 1. 立即解冻 (全员下场，不再等待)
   UNFREEZE_EPOCH: 0
 
 
