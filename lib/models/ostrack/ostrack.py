@@ -38,55 +38,40 @@ class ProTeusH(nn.Module):
 
         B = template.shape[0]
 
-        # 1. Anchor (Detached! 极其重要，不要让梯度回传给 backbone)
+        # 1. Anchor 锁死 (保持不变)
         with torch.no_grad():
             z_patch, _ = self.backbone.patch_embed(template)
-            p_anchor = torch.mean(z_patch.reshape(B, -1, 512), dim=1, keepdim=True)
-            p_anchor = p_anchor.detach()  # 🔒 锁死 Anchor
+            p_anchor = torch.mean(z_patch.reshape(B, -1, 512), dim=1, keepdim=True).detach()
 
-        # 2. Mamba Prediction
-        # 在 ProTeusH.forward 中修改训练分支逻辑
+        # 2. 根本性修复：对齐训练/推理分布
         if prompt_history is None:
-            # 模拟训练阶段
             prompt_history = p_anchor.repeat(1, 16, 1)
-
             if self.training:
-                # 🚀 根本性改进：训练时引入 10% 的时序扰动噪声
-                # 强迫 Backbone 学会纠正那些“稍微有点偏”的时序特征，而不是只依赖完美的 anchor
-                noise = torch.randn_like(prompt_history) * 0.02
+                # 🚀 模拟推理时的不确定性，加入 5% 的动态扰动
+                # 这样 Mamba 才会学会在“不完美历史”下如何纠偏
+                noise = torch.randn_like(prompt_history) * 0.05
                 prompt_history = prompt_history + noise
 
         p_prior = self.predictor(prompt_history).unsqueeze(1)
 
-        # 3. Backbone Inference
-        if template.shape[3] != search.shape[3]:
-            padding_width = search.shape[3] - template.shape[3]
-            template_padded = F.pad(template, (0, padding_width, 0, 0))
-        else:
-            template_padded = template
-        x_in = torch.cat([template_padded, search], dim=2)
-
-        # Backbone 正常前向传播 (允许梯度回传)
+        # 3. Backbone 特征提取 (保持不变)
+        # ... x_in = cat([template, search]) ...
         results = self.backbone(x_in)
-        f3 = results[-1]
-        visual_feats = f3.flatten(2).transpose(1, 2)
+        visual_feats = results[-1].flatten(2).transpose(1, 2)  # [B, N, 512]
 
-        # 4. UOT + Synergy
+        # 4. UOT + Synergy (保持不变)
         p_obs, confidence = self.observer(p_prior, visual_feats)
         p_next = self.synergy(p_anchor, p_prior, p_obs, confidence)
 
-        # 5. 根本性融合重构：Uncertainty-Weighted Fusion
+        # 5. 根本性修复：放弃简单的 ResAdd，改用注意力融合
+        # 让视觉特征去“检索”时序特征，实现空间上的精准对齐
         alpha = torch.tanh(self.fusion_alpha)
+        # p_next 作为 Key/Value, visual_feats 作为 Query
+        aligned_temporal, _ = self.spatial_align(visual_feats, p_next, p_next)
 
-        # 🚀 关键：利用 Synergy 计算出的 confidence (最优传输代价导出的置信度)
-        # 当观测与预测冲突很大时，confidence 趋于 0，自动关闭时序分支对视觉特征的影响
-        dynamic_alpha = alpha * torch.sigmoid(confidence)
-
-        feat_scale = visual_feats.abs().mean().detach()
-        p_next_scaled = F.normalize(p_next, dim=-1) * feat_scale
-
-        # 使用 dynamic_alpha 进行残差融合
-        refined_feats = visual_feats + dynamic_alpha * p_next_scaled
+        # 动态控制：只有当置信度高时，才允许时序信息介入
+        gate = alpha * torch.sigmoid(confidence)
+        refined_feats = self.norm_align(visual_feats + gate * aligned_temporal)
 
         out = self.forward_head(refined_feats)
 

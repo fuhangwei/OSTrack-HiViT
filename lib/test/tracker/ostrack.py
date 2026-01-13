@@ -146,19 +146,17 @@ class OSTrack(BaseTracker):
         with torch.no_grad():
             out_dict = self.network(..., prompt_history=history_tensor)
 
+            # 修改 track 函数中的更新逻辑
             if 'p_obs' in out_dict:
-                # 1. 提取当前帧的最高置信度
                 conf = out_dict['score_map'].max().item()
 
-                # 2. 根本性更新策略：Kalman-style Update
-                # 阈值 0.45 是 OSTrack 的目标存在分界点
-                if conf > 0.45:
-                    # 视觉可信：使用真实的视觉观测 p_obs 更新历史
+                # 根本性改进：只有视觉置信度极高时才更新观测，否则进入“盲推模式”
+                if conf > 0.5:
+                    # 情况A：看清了，压入真实观测
                     current_feat = out_dict['p_obs'].detach()
                 else:
-                    # 视觉失效（遮挡/消失）：严禁压入 p_obs！
-                    # 压入 Mamba 自己的预测 p_next，让模型基于“惯性”继续推演历史
-                    # 这能防止 Mamba 的状态空间（Hidden State）被背景特征污染
+                    # 情况B：遮挡/丢失，严禁压入 p_obs (那是背景噪声！)
+                    # 压入上一帧的特征或者 Mamba 的预测，保持惯性
                     current_feat = out_dict['p_next'].detach()
 
                 self.prompt_history.append(current_feat)
