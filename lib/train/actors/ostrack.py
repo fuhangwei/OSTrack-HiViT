@@ -115,16 +115,19 @@ class OSTrackActor(BaseActor):
         unfreeze_epoch = self.cfg.TRAIN.UNFREEZE_EPOCH
 
         if 'p_next' in pred_dict and 'p_anchor' in pred_dict:
-            # 1. 确保 Target 不传梯度给 Backbone (只训练 Mamba)
             target = pred_dict['p_anchor'].detach()
             prediction = pred_dict['p_next']
 
-            # 2. Cosine Embedding Loss
-            # 目标是最大化相似度，即最小化 (1 - cos)
             cosine_sim = F.cosine_similarity(prediction, target, dim=-1)
             loss_reg = (1 - cosine_sim).mean()
-            # 动态权重：解冻后提高约束强度
-            reg_weight = 0.1 if curr_epoch < unfreeze_epoch else self.cfg.TRAIN.REG_WEIGHT
+
+            # 🟢 [修改] 不要硬编码 0.1，这会扼杀 Mamba 的创造力
+            # 如果还没解冻(Warmup)，建议 reg_weight 为 0，允许 Mamba 自由探索
+            # 或者始终使用 cfg.TRAIN.REG_WEIGHT (建议设为 0.0 或 0.001)
+            if curr_epoch < unfreeze_epoch:
+                reg_weight = 0.0  # Warmup 期间完全不约束，让它尝试预测运动
+            else:
+                reg_weight = self.cfg.TRAIN.REG_WEIGHT
         else:
             loss_reg = torch.tensor(0.0, device=l1_loss.device)
             reg_weight = 0.0

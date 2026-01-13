@@ -129,8 +129,12 @@ class LTRTrainer(BaseTrainer):
         # ==========================================================
         # --- ProTeus-H Phase 3: 联合解冻逻辑 ---
         # ==========================================================
-        # 获取解冻轮数 (从 settings 读取，即从 YAML 读取)
-        unfreeze_epoch = getattr(self.settings, 'unfreeze_epoch', 40)
+        # 尝试从 YAML 结构中读取，如果不存在则设为 0 (即默认不冻结/直接微调)
+        if hasattr(self.settings, 'TRAIN') and hasattr(self.settings.TRAIN, 'UNFREEZE_EPOCH'):
+            unfreeze_epoch = self.settings.TRAIN.UNFREEZE_EPOCH
+        else:
+            # 作为一个 Phase 3 微调任务，默认应该是一开始就解冻，或者是 0
+            unfreeze_epoch = getattr(self.settings, 'unfreeze_epoch', 0)
 
         if self.epoch == unfreeze_epoch:
             print(f"\n[ProTeus-H Strategy] Epoch {self.epoch}: Unfreezing Modules (Target: {unfreeze_epoch})!")
@@ -142,11 +146,16 @@ class LTRTrainer(BaseTrainer):
                     param.requires_grad = True
                 print(f">>> Backbone parameters are now LEARNABLE.")
 
-            # 2. 【新增】解冻 Mamba Predictor (适应特征变化)
-            # if hasattr(self.actor.net, 'predictor'):
-            #     for name, param in self.actor.net.predictor.named_parameters():
-            #         param.requires_grad = True
-            #     print(f">>> Mamba Predictor parameters are now LEARNABLE.")
+                # 2. 🟢 [必须取消注释] 解冻 Mamba Predictor
+                # 注意：请确保你的模型属性名是 'predictor' (你在 ostrack.py 里定义的是 self.predictor)
+                curr_net = self.actor.net.module if hasattr(self.actor.net, 'module') else self.actor.net
+
+                if hasattr(curr_net, 'predictor'):
+                    for name, param in curr_net.predictor.named_parameters():
+                        param.requires_grad = True
+                    print(f">>> Mamba Predictor parameters are now LEARNABLE.")
+                else:
+                    print("!!! Warning: 'predictor' not found in net. Check your naming.")
 
             # 提示：UOT 和 Synergy 本来就是解冻的，不用管
             print("-" * 60 + "\n")
