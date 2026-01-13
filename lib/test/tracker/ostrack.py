@@ -144,20 +144,20 @@ class OSTrack(BaseTracker):
 
         # 修改 lib/test/tracker/ostrack.py 中的 track 函数
         with torch.no_grad():
-            out_dict = self.network(..., prompt_history=history_tensor)
+            # 🚀 [修复语法] 显式传入 template 和 search
+            out_dict = self.network(
+                template=self.z_dict1.tensors.cuda(),
+                search=search.tensors.cuda(),
+                ce_template_mask=self.box_mask_z,
+                prompt_history=history_tensor
+            )
 
-            # 修改 track 函数中的更新逻辑
             if 'p_obs' in out_dict:
                 conf = out_dict['score_map'].max().item()
-
-                # 根本性改进：只有视觉置信度极高时才更新观测，否则进入“盲推模式”
-                if conf > 0.5:
-                    # 情况A：看清了，压入真实观测
-                    current_feat = out_dict['p_obs'].detach()
-                else:
-                    # 情况B：遮挡/丢失，严禁压入 p_obs (那是背景噪声！)
-                    # 压入上一帧的特征或者 Mamba 的预测，保持惯性
-                    current_feat = out_dict['p_next'].detach()
+                # 🚀 [核心修复] 置信度卫兵
+                # 如果分类置信度 < 0.45，判定为干扰，此时压入 Mamba 预测的 p_next (维持时序惯性)
+                # 而不是压入 p_obs (防止背景噪声毒化隐藏状态)
+                current_feat = out_dict['p_obs'].detach() if conf > 0.45 else out_dict['p_next'].detach()
 
                 self.prompt_history.append(current_feat)
                 self.prompt_history.pop(0)

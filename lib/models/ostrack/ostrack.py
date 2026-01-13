@@ -12,6 +12,8 @@ from lib.models.ostrack.synergy_update import BayesianSynergy
 from lib.utils.box_ops import box_xyxy_to_cxcywh
 
 
+# lib/models/ostrack/ostrack.py
+
 class ProTeusH(nn.Module):
     def __init__(self, transformer, box_head, head_type="CENTER"):
         super().__init__()
@@ -19,66 +21,58 @@ class ProTeusH(nn.Module):
         self.box_head = box_head
         self.head_type = head_type
 
-        # Phase 3 组件
+        # Phase 3 组件 (必须在这里定义，否则 forward 会报错)
         self.predictor = MambaPredictor(dim=512)
         self.observer = UOTObserver(dim=512)
         self.synergy = BayesianSynergy(dim=512)
 
-        # 零初始化阀门 (完美继承 Phase 1 性能的关键)
+        # 🚀 [必须定义] 空间对齐与融合层
+        self.spatial_align = nn.MultiheadAttention(embed_dim=512, num_heads=8, batch_first=True)
+        # ⚠️ 注意：不要用 LayerNorm，改用简单的权重残差，保护视觉特征
         self.fusion_alpha = nn.Parameter(torch.tensor(0.0))
 
-        if head_type == "CORNER" or head_type == "CENTER":
-            self.feat_sz_s = int(box_head.feat_sz)
-            self.feat_len_s = int(box_head.feat_sz ** 2)
-
-    def forward(self, template: torch.Tensor,
-                search: torch.Tensor,
-                prompt_history=None,
-                **kwargs):
-
+    def forward(self, template, search, ce_template_mask=None, ce_keep_rate=None, prompt_history=None, **kwargs):
         B = template.shape[0]
 
-        # 1. Anchor 锁死 (保持不变)
+        # 1. 获取 Anchor (保持不变)
         with torch.no_grad():
             z_patch, _ = self.backbone.patch_embed(template)
             p_anchor = torch.mean(z_patch.reshape(B, -1, 512), dim=1, keepdim=True).detach()
 
-        # 2. 根本性修复：对齐训练/推理分布
+        # 2. 模拟训练/推理分布一致性
         if prompt_history is None:
             prompt_history = p_anchor.repeat(1, 16, 1)
             if self.training:
-                # 🚀 模拟推理时的不确定性，加入 5% 的动态扰动
-                # 这样 Mamba 才会学会在“不完美历史”下如何纠偏
-                noise = torch.randn_like(prompt_history) * 0.05
-                prompt_history = prompt_history + noise
+                # 🚀 增加扰动噪声，让 Mamba 学会在噪声中保持鲁棒
+                prompt_history = prompt_history + torch.randn_like(prompt_history) * 0.05
 
         p_prior = self.predictor(prompt_history).unsqueeze(1)
 
-        # 3. Backbone 特征提取 (保持不变)
-        # ... x_in = cat([template, search]) ...
-        results = self.backbone(x_in)
-        visual_feats = results[-1].flatten(2).transpose(1, 2)  # [B, N, 512]
+        # 3. 🚀 [修复定义错误] 定义 x_in 并输入 Backbone
+        # 必须模拟 OSTrack 的 concat 逻辑
+        from lib.utils.merge import merge_template_search
+        x_in, _ = merge_template_search(template, search, ce_template_mask, ce_keep_rate)
 
-        # 4. UOT + Synergy (保持不变)
+        results = self.backbone(x_in)
+        # 获取 Search 特征 (排除 Template tokens)
+        visual_feats = results[-1][:, -self.feat_len_s:]  # [B, N, 512]
+
+        # 4. UOT + Synergy
         p_obs, confidence = self.observer(p_prior, visual_feats)
         p_next = self.synergy(p_anchor, p_prior, p_obs, confidence)
 
-        # 5. 根本性修复：放弃简单的 ResAdd，改用注意力融合
-        # 让视觉特征去“检索”时序特征，实现空间上的精准对齐
+        # 5. 🚀 [根本性修复] 空间注意力对齐
+        # 去掉之前的暴力 ResAdd，改用 MHA 让视觉 patch 自己去找时序对应关系
         alpha = torch.tanh(self.fusion_alpha)
-        # p_next 作为 Key/Value, visual_feats 作为 Query
+        # visual_feats 做 Query, p_next 做 Key/Value
         aligned_temporal, _ = self.spatial_align(visual_feats, p_next, p_next)
 
-        # 动态控制：只有当置信度高时，才允许时序信息介入
+        # 使用门控融合，不使用 LayerNorm 以免破坏 Backbone 分布
         gate = alpha * torch.sigmoid(confidence)
-        refined_feats = self.norm_align(visual_feats + gate * aligned_temporal)
+        refined_feats = visual_feats + gate * aligned_temporal
 
         out = self.forward_head(refined_feats)
-
-        # Return history for next frame
-        out['p_next'] = p_next
-        out['p_anchor'] = p_anchor
-        out['p_obs'] = p_obs  # <--- 关键修复：必须传出这个观测值
+        out.update({'p_next': p_next, 'p_anchor': p_anchor, 'p_obs': p_obs})
         return out
 
     def forward_head(self, cat_feature):
