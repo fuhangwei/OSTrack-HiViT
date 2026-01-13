@@ -3,16 +3,7 @@ DATA:
   MEAN: [0.485, 0.456, 0.406]
   STD: [0.229, 0.224, 0.225]
   SAMPLER_MODE: causal
-  DATASETS_NAME:
-    - LASOT
-    - GOT10K_train_full
-    - TRACKINGNET
-    - COCO17  # 可以保留少量静态图做正则化
-  DATASETS_RATIO:
-    - 1
-    - 1
-    - 1
-    - 1
+
   TRAIN:
     # 【修改1】数据集必须与 Phase 1 保持一致！
     # 如果 Phase 3 突然去掉了 TrackingNet 或用了小版 GOT，模型会“遗忘”之前学到的野外抗干扰能力。

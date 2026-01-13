@@ -145,6 +145,12 @@ def build_ostrack(cfg, training=True):
         if os.path.exists(mamba_path):
             model.predictor.load_state_dict(torch.load(mamba_path, map_location='cpu', weights_only=False))
             print("[Phase 3] Loaded Mamba Pre-trained Weights.")
+            # ❄️❄️❄️ 【必须新增】冻结 Mamba，贯彻 Anchor 策略 ❄️❄️❄️
+            # 只有加上这就话，Backbone 才会乖乖去适应 Mamba，而不是两个一起乱跑
+            for p in model.predictor.parameters():
+                p.requires_grad = False
+            print(">>> [Phase 3 Strategy] Mamba Predictor is FROZEN (Acting as Anchor).")
+            # ❄️❄️❄️ 结束 ❄️❄️❄️
         else:
             print("[Warning] Mamba weights not found! Using Random Init.")
 
