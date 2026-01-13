@@ -57,7 +57,7 @@ TRAIN:
   NUM_WORKER: 8
   OPTIMIZER: ADAMW
   BACKBONE_MULTIPLIER: 0.05  # 骨干仅仅微调
-  REG_WEIGHT: 0.5         # 关键：增加正则项权重，强制要求 p_next 必须靠近 p_anchor
+  REG_WEIGHT: 0.0        # 关键：增加正则项权重，强制要求 p_next 必须靠近 p_anchor
   GIOU_WEIGHT: 2.0
   L1_WEIGHT: 5.0
   GRAD_CLIP_NORM: 0.1
