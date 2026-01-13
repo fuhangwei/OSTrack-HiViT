@@ -5,7 +5,7 @@ DATA:
   SAMPLER_MODE: causal
   DATASETS_NAME:
     - LASOT
-    - GOT10K_vottrain
+    - GOT10K_train_full
     - TRACKINGNET
     - COCO17  # 可以保留少量静态图做正则化
   DATASETS_RATIO:
