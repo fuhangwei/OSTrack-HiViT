@@ -93,6 +93,7 @@ class ProTeusH(nn.Module):
         # Return history for next frame
         out['p_next'] = p_next
         out['p_anchor'] = p_anchor
+        out['p_obs'] = p_obs  # <--- 必须传出这个
         return out
 
     def forward_head(self, cat_feature):

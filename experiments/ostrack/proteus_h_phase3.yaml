@@ -3,6 +3,16 @@ DATA:
   MEAN: [0.485, 0.456, 0.406]
   STD: [0.229, 0.224, 0.225]
   SAMPLER_MODE: causal
+  DATASETS_NAME:
+    - LASOT
+    - GOT10K_vottrain
+    - TRACKINGNET
+    - COCO17  # 可以保留少量静态图做正则化
+  DATASETS_RATIO:
+    - 1
+    - 1
+    - 1
+    - 1
   TRAIN:
     # 【修改1】数据集必须与 Phase 1 保持一致！
     # 如果 Phase 3 突然去掉了 TrackingNet 或用了小版 GOT，模型会“遗忘”之前学到的野外抗干扰能力。
@@ -52,41 +62,30 @@ MODEL:
   MAMBA_PRETRAIN_FILE: "pretrained_models/mamba_phase2.pth"
 
 TRAIN:
-#  LR: 0.0001              # 低学习率微调 (Phase 1 是 0.0004)
+  LR: 0.00002             # 低学习率微调 (Phase 1 是 0.0004)
   WEIGHT_DECAY: 0.0001
-  EPOCH: 60
+  EPOCH: 20
   LR_DROP_EPOCH: 45
 
   # 【修改3】显存安全警报
   # Phase 3 增加了 Mamba + UOT 模块，且 AMP: False 极其吃显存。
   # 4090D (24G) 跑 32 必爆！必须降回 16。
-  BATCH_SIZE: 16
+  BATCH_SIZE: 32
 
   NUM_WORKER: 8
   OPTIMIZER: ADAMW
-#  BACKBONE_MULTIPLIER: 0.01  # 骨干仅仅微调
+  BACKBONE_MULTIPLIER: 0.1  # 骨干仅仅微调
   GIOU_WEIGHT: 2.0
   L1_WEIGHT: 5.0
   GRAD_CLIP_NORM: 0.1
   PRINT_INTERVAL: 50
   VAL_EPOCH_INTERVAL: 5
-
   # 保持 False 防止 Sinkhorn 出现 NaN
   AMP: False
   DROP_PATH_RATE: 0.1
-
-  # Phase 3 核心逻辑
-    # 【必杀技 3】: 策略大调整
-
     # 1. 立即解冻 (全员下场，不再等待)
   UNFREEZE_EPOCH: 0
 
-    # 2. 降低 Mamba 约束 (只让它当辅助，别当主力)
-  REG_WEIGHT: 1  # 从 0.5 降到 0.05
-
-  # 3. 极度保护 Backbone (防止被带偏)
-  LR: 0.0001
-  BACKBONE_MULTIPLIER: 0.001  # 从 0.01 再降 10 倍！
 
   SCHEDULER:
     TYPE: step

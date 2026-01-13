@@ -150,11 +150,19 @@ class OSTrack(BaseTracker):
                 prompt_history=history_tensor
             )
 
-        # ProTeus-H: 更新历史
-        if 'p_next' in out_dict:
-            p_new = out_dict['p_next'].detach()
-            self.prompt_history.append(p_new)
-            self.prompt_history.pop(0)
+            # ProTeus-H: 更新历史 (逻辑重写)
+            # 在 track 函数的更新历史部分
+            if 'p_obs' in out_dict:
+                # 优先使用观测值（眼睛看到的），除非完全遮挡
+                current_feat = out_dict['p_obs'].detach()
+
+                # 如果置信度太低（全遮挡），才考虑用预测值兜底
+                # 但为了稳健，SOTA 策略通常是：宁可信错眼睛，不信瞎猜的大脑
+                # 所以直接存 p_obs 往往效果最好，或者做一个加权
+                # current_feat = out_dict['p_obs'].detach() * 0.8 + out_dict['p_next'].detach() * 0.2
+
+                self.prompt_history.append(current_feat)
+                self.prompt_history.pop(0)
 
         # 获取 Confidence
         uot_conf = out_dict.get('uot_confidence', torch.tensor(1.0)).item() if 'uot_confidence' in out_dict else 1.0
