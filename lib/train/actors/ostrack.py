@@ -31,6 +31,19 @@ class OSTrackActor(BaseActor):
 
         # compute losses
         loss, status = self.compute_losses(out_dict, data, curr_epoch=curr_epoch)
+        # 1. 计算完各个 Loss 之后，获取当前的 fusion_alpha 值
+        # 注意：如果是多卡训练 (DDP)，需要通过 .module 访问
+        curr_net = self.net.module if hasattr(self.net, 'module') else self.net
+
+        # 2. 将 alpha 值存入 status 字典
+        if hasattr(curr_net, 'fusion_alpha'):
+            # 获取原始参数值
+            raw_alpha = curr_net.fusion_alpha.item()
+            status['alpha'] = raw_alpha
+
+            # 如果你想看经过 tanh 激活后真正生效的系数（推荐）：
+            import torch
+            status['alpha_eff'] = torch.tanh(torch.tensor(raw_alpha)).item()
 
         return loss, status
 

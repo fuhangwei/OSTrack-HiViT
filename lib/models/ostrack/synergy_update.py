@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # 【新增】需要用到 F
 
 
 class BayesianSynergy(nn.Module):
@@ -9,20 +10,14 @@ class BayesianSynergy(nn.Module):
         self.gating = nn.Sequential(
             nn.Linear(1, 16),
             nn.ReLU(),
-            nn.Linear(16, 3)  # 注意：这里去掉了 Softmax，放到 forward 里做
+            nn.Linear(16, 3)
         )
 
         # 【核心修复】恒等初始化 (Identity Initialization)
-        # 强制让初始权重偏向 Anchor (w1)，屏蔽 Mamba (w2) 和 UOT (w3)
-        # 我们修改最后一层 Linear 的 bias
         last_layer = self.gating[-1]
-
-        # 将 weight 设为极小值，消除输入(confidence)的影响
         nn.init.zeros_(last_layer.weight)
 
-        # 设置 bias: [High, Low, Low]
-        # 这样 Softmax 出来接近 [1.0, 0.0, 0.0]
-        # 比如 [5.0, -5.0, -5.0] -> Softmax -> [0.9999, 0.00005, 0.00005]
+        # 设置 bias: [High, Low, Low] -> Softmax -> [1.0, 0.0, 0.0]
         custom_bias = torch.tensor([5.0, -5.0, -5.0])
         last_layer.bias.data.copy_(custom_bias)
 
@@ -32,6 +27,14 @@ class BayesianSynergy(nn.Module):
         """
         confidence: 来自 UOT 的 total_mass [B, 1, 1]
         """
+
+        # 🚀【新增必杀技】强制归一化 (LayerNorm)
+        # 解决 "Scale Mismatch" 问题，确保 Mamba 的微弱信号能被同等对待
+        # 注意：我们对最后一个维度 (dim=512) 做归一化
+        p_anchor = F.layer_norm(p_anchor, p_anchor.shape[-1:])
+        p_mamba = F.layer_norm(p_mamba, p_mamba.shape[-1:])
+        p_uot = F.layer_norm(p_uot, p_uot.shape[-1:])
+
         # 计算 Logits
         logits = self.gating(confidence.squeeze(-1))  # [B, 3]
 

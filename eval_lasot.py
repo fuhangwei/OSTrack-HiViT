@@ -3,7 +3,8 @@ import numpy as np
 
 # ================= 配置区域 =================
 # 你的结果文件存放路径 (请确认此路径正确)
-RESULT_DIR = "output/test/tracking_results/ostrack/proteus_h_phase3"
+# RESULT_DIR = "output/test/tracking_results/ostrack/proteus_h_phase3"
+RESULT_DIR = "output/test/tracking_results/ostrack/hivit_base_256"
 # LaSOT 数据集根目录
 DATASET_ROOT = "data/lasot"
 
