@@ -1,14 +1,12 @@
 import math
 import os
+from typing import List
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from lib.models.layers.head import build_box_head
 from lib.models.ostrack.hivit import hivit_base
-from lib.models.ostrack.mamba_predictor import MambaPredictor
-from lib.models.ostrack.uot_observer import UOTObserver
-from lib.models.ostrack.synergy_update import BayesianSynergy
 from lib.utils.box_ops import box_xyxy_to_cxcywh
 
 
@@ -19,94 +17,60 @@ class ProTeusH(nn.Module):
         self.box_head = box_head
         self.head_type = head_type
 
-        # Phase 3 核心组件
-        self.predictor = MambaPredictor(dim=512)
-        self.observer = UOTObserver(dim=512)
-        self.synergy = BayesianSynergy(dim=512)
-
-        # 🟢 [SOTA 新增] 模长对齐层 (防止 Phase 2/3 分布失配)
-        self.norm_fusion = nn.LayerNorm(512)
-
-        # 🟢 [新增代码] 使用门控通道调制 (FiLM 机制)
-        # 将 p_next (B, 1, 512) 映射为缩放因子 (Scale) 和 偏置 (Shift)
-        self.fusion_map = nn.Linear(512, 512 * 2)
-        # 初始化为 "无操作" 状态 (Scale=1, Shift=0)
-        nn.init.constant_(self.fusion_map.weight, 0)
-        nn.init.constant_(self.fusion_map.bias, 0)
-
-        # 融合力度控制参数
-        self.fusion_alpha = nn.Parameter(torch.tensor(0.0))
+        # ============================================================
+        # [Phase 1] 纯净模式：所有 Phase 3 组件全部注释掉
+        # ============================================================
+        # self.predictor = MambaPredictor(dim=512)
+        # self.observer = UOTObserver(dim=512)
+        # self.synergy = BayesianSynergy(dim=512)
+        # self.norm_fusion = nn.LayerNorm(512)
+        # self.fusion_map = nn.Linear(512, 512 * 2)
+        # self.fusion_alpha = nn.Parameter(torch.tensor(0.0))
+        # ============================================================
 
         if head_type == "CORNER" or head_type == "CENTER":
             self.feat_sz_s = int(box_head.feat_sz)
             self.feat_len_s = int(box_head.feat_sz ** 2)
 
-    def forward(self, template, search, ce_template_mask=None, ce_keep_rate=None, prompt_history=None, **kwargs):
-        B = template.shape[0]
+    def forward(self, template: torch.Tensor,
+                search: torch.Tensor,
+                ce_template_mask=None,
+                ce_keep_rate=None,
+                return_last_attn=False,
+                prompt_history=None,
+                **kwargs):
 
-        # 1. Anchor 锁死
-        with torch.no_grad():
-            z_patch, _ = self.backbone.patch_embed(template)
-            p_anchor = torch.mean(z_patch.reshape(B, -1, 512), dim=1, keepdim=True).detach()
-
-        # 2. 对齐训练/推理分布 & 🔴 [关键修复：输入归一化]
-        if prompt_history is None:
-            # 训练时的“假时序”增强：增加更大的噪声来模拟运动，防止过拟合静态
-            prompt_history = p_anchor.repeat(1, 16, 1)
-            if self.training:
-                # 增大噪声幅度 (0.05)，模拟帧间变化
-                prompt_history = prompt_history + torch.randn_like(prompt_history) * 0.05
-
-        # 🟢 [关键修复] Mamba 输入必须归一化
-        prompt_history_norm = F.normalize(prompt_history, p=2, dim=-1)
-        p_prior = self.predictor(prompt_history_norm).unsqueeze(1)
-
-        # 3. Backbone Inference
+        # 1. 预处理
         if template.shape[3] != search.shape[3]:
             padding_width = search.shape[3] - template.shape[3]
             template_padded = F.pad(template, (0, padding_width, 0, 0))
         else:
             template_padded = template
+
         x_in = torch.cat([template_padded, search], dim=2)
 
+        # 2. Backbone 前向传播 (标准 OSTrack 逻辑)
+        # Phase 1 不需要复杂的 forward_tracking，直接跑就行
         results = self.backbone(x_in)
         f3 = results[-1]
+
+        # [B, 512, H, W] -> [B, N, 512]
         f3_flat = f3.flatten(2).transpose(1, 2)
+
+        # 3. 提取 Search 区域特征
         visual_feats = f3_flat[:, -self.feat_len_s:]
 
-        # 4. UOT + Synergy
-        p_obs, confidence = self.observer(p_prior, visual_feats)
-        p_next = self.synergy(p_anchor, p_prior, p_obs, confidence)
-
         # ============================================================
-        # 🟢 [关键修复] 通道调制融合
+        # [Phase 1] 纯净模式：没有任何融合逻辑
         # ============================================================
+        # 这里直接把纯视觉特征送入 Head
 
-        # 1. 先进行 LayerNorm，消除模长波动
-        p_next_norm = self.norm_fusion(p_next)
-
-        # 2. 生成调制参数
-        style = self.fusion_map(p_next_norm)
-        scale, shift = style.chunk(2, dim=-1)
-
-        # 3. 门控系数
-        alpha = torch.tanh(self.fusion_alpha)
-
-        # 4. 调制公式: Visual * (1 + Scale) + Shift
-        modulated_feats = visual_feats * (1.0 + alpha * torch.sigmoid(scale)) + alpha * shift
-
-        # 残差连接
-        refined_feats = visual_feats + modulated_feats
-
-        # ============================================================
-
-        out = self.forward_head(refined_feats)
-        out.update({'p_next': p_next, 'p_anchor': p_anchor, 'p_obs': p_obs})
+        out = self.forward_head(visual_feats)
         return out
 
     def forward_head(self, cat_feature):
-        enc_opt = cat_feature[:, -self.feat_len_s:]
-        opt = (enc_opt.unsqueeze(-1)).permute((0, 3, 2, 1)).contiguous()
+        # [B, N, C] -> [B, C, N] -> [B, C, H, W]
+        opt = (cat_feature.unsqueeze(-1)).permute((0, 3, 2, 1)).contiguous()
         bs, Nq, C, HW = opt.size()
         opt_feat = opt.view(-1, C, self.feat_sz_s, self.feat_sz_s)
 
@@ -122,52 +86,66 @@ def build_ostrack(cfg, training=True):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     pretrained_path = os.path.join(current_dir, '../../../pretrained_models')
 
+    # 1. 构建 Backbone
     backbone = hivit_base()
-    box_head = build_box_head(cfg, 512)
+    hidden_dim = 512
+
+    # 2. 加载 ImageNet 预训练权重 (关键)
+    if cfg.MODEL.PRETRAIN_FILE and training:
+        # Phase 1 加载的是 hivit_base_224.pth
+        ckpt_path = cfg.MODEL.PRETRAIN_FILE
+        try:
+            print(f">>> [Phase 1] Loading ImageNet weights from: {ckpt_path}")
+            # weights_only=False 解决 PyTorch 版本问题
+            checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+
+            if 'model' in checkpoint:
+                state_dict = checkpoint['model']
+            elif 'net' in checkpoint:
+                state_dict = checkpoint['net']
+            else:
+                state_dict = checkpoint
+
+                # --- ostrack.py 中的 build_ostrack 修正片段 ---
+
+            # 适配 ImageNet 权重 key (核心：处理 8 个 block 的偏移)
+            backbone_dict = backbone.state_dict()
+            new_dict = {}
+            for k, v in state_dict.items():
+                k_clean = k.replace('module.', '')
+
+                # 处理核心 Transformer blocks 的偏移映射
+                if k_clean.startswith('blocks.'):
+                    parts = k_clean.split('.')
+                    idx = int(parts[1])
+                    # 将官方 0-23 映射到 8-31
+                    new_idx = idx + 8
+                    k_mapped = k_clean.replace(f'blocks.{idx}', f'blocks.{new_idx}')
+
+                    if k_mapped in backbone_dict and v.shape == backbone_dict[k_mapped].shape:
+                        new_dict[k_mapped] = v
+
+                # 处理其他非 block 权重（如 patch_embed, pos_embed）
+                elif k_clean in backbone_dict and v.shape == backbone_dict[k_clean].shape:
+                    new_dict[k_clean] = v
+
+            msg = backbone.load_state_dict(new_dict, strict=False)
+            print(f">>> [Phase 1] Loaded {len(new_dict)} keys into Backbone. (Mapped Stage 3)")
+            # 此时 Missing keys 应该只剩下 blocks.0 到 blocks.7
+
+        except Exception as e:
+            print(f">>> [Error] Failed to load ImageNet weights: {e}")
+            # Phase 1 如果加载不到预训练权重是致命的，这里抛出异常
+            raise e
+
+    # 3. 构建 Head & Model
+    box_head = build_box_head(cfg, hidden_dim)
     model = ProTeusH(backbone, box_head, head_type=cfg.MODEL.HEAD.TYPE)
 
-    if cfg.MODEL.PRETRAIN_FILE and training:
-        ckpt_path = cfg.MODEL.PRETRAIN_FILE
-        print(f">>> [Phase 3] Loading weights from: {ckpt_path}")
-        # weights_only=False 适配不同 torch 版本
-        checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-        state_dict = checkpoint['net'] if 'net' in checkpoint else checkpoint
-
-        model_dict = model.state_dict()
-        new_dict = {}
-        load_count = 0
-        for k, v in state_dict.items():
-            k_clean = k.replace('module.', '')
-            if k_clean in model_dict:
-                if v.shape == model_dict[k_clean].shape:
-                    new_dict[k_clean] = v
-                    load_count += 1
-
-        # 严格检查 Box Head
-        head_loaded = any("box_head" in k for k in new_dict.keys())
-        if not head_loaded:
-            # 有时候 Phase 1 的 checkpoint 键名可能有差异，这里做一个容错或者报错
-            print("!!! Warning: Box Head weights might be missing. Check your Phase 1 checkpoint.")
-
-        model.load_state_dict(new_dict, strict=False)
-        print(f">>> [Phase 3] Loaded {load_count} keys from Phase 1.")
-
     if training:
-        mamba_path = os.path.join(pretrained_path, "mamba_phase2.pth")
-        if os.path.exists(mamba_path):
-            model.predictor.load_state_dict(torch.load(mamba_path, map_location='cpu', weights_only=False))
-            print("[Phase 3] Loaded Mamba Pre-trained Weights.")
-
-            # 🟢 [SOTA 策略] 必须解冻 Mamba
-            for p in model.predictor.parameters():
-                p.requires_grad = True
-            print(">>> [Phase 3 Strategy] Mamba Predictor UNLOCKED.")
-        else:
-            print("[Warning] Mamba weights not found! Using Random Init.")
-
-        # 🟢 [SOTA 策略] 强制解冻 Backbone
-        for n, p in model.backbone.named_parameters():
+        # Phase 1 全员解冻
+        for p in model.parameters():
             p.requires_grad = True
-        print(">>> [Phase 3 SOTA Strategy] FORCED Backbone requires_grad = True.")
+        print(">>> [Phase 1] All parameters unfreezed for training.")
 
     return model

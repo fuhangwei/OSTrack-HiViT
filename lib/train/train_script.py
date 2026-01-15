@@ -43,7 +43,7 @@ def run(settings):
 
     # 强制开启每轮保存
     settings.save_every_epoch = True
-    settings.save_interval = 1
+    settings.save_interval = 20
 
     # Record the training log
     log_dir = os.path.join(settings.save_dir, 'logs')
@@ -99,22 +99,22 @@ def run(settings):
     # 此时所有参数都在 parameters() 里，且 requires_grad=True
     optimizer, lr_scheduler = get_optimizer_scheduler(net, cfg)
 
-    # 步骤 C: 立即恢复 Phase 3 初始的冻结状态
-    # 只有这样，前 UNFREEZE_EPOCH 轮 Backbone 才不会动
-    if hasattr(net, "module"):  # DDP 包装的情况
-        backbone_net = net.module.backbone
-        predictor_net = net.module.predictor
-    else:  # 单卡模式
-        backbone_net = net.backbone
-        predictor_net = net.predictor
-
-    # 重新冻结
-    for p in backbone_net.parameters():
-        p.requires_grad = False
-    for p in predictor_net.parameters():
-        p.requires_grad = False
-
-    print(">>> [Phase 3] Optimizer initialized. Backbone & Mamba are currently FROZEN.")
+    # # 步骤 C: 立即恢复 Phase 3 初始的冻结状态
+    # # 只有这样，前 UNFREEZE_EPOCH 轮 Backbone 才不会动
+    # if hasattr(net, "module"):  # DDP 包装的情况
+    #     backbone_net = net.module.backbone
+    #     predictor_net = net.module.predictor
+    # else:  # 单卡模式
+    #     backbone_net = net.backbone
+    #     predictor_net = net.predictor
+    #
+    # # 重新冻结
+    # for p in backbone_net.parameters():
+    #     p.requires_grad = False
+    # for p in predictor_net.parameters():
+    #     p.requires_grad = False
+    #
+    # print(">>> [Phase 3] Optimizer initialized. Backbone & Mamba are currently FROZEN.")
     # ==========================================================
 
     use_amp = getattr(cfg.TRAIN, "AMP", False)

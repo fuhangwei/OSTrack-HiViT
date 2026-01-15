@@ -14,7 +14,7 @@ DATA:
     - 1
     - 1
     - 1                           # 对应 TrackingNet 的采样比例
-    SAMPLE_PER_EPOCH: 60000       # 全量数据采样数
+    SAMPLE_PER_EPOCH: 30000       # 全量数据采样数
   VAL:
     DATASETS_NAME:
     - GOT10K_votval
@@ -42,13 +42,13 @@ MODEL:
   # 【修改3】这是重中之重！
   # Phase 1 必须加载 ImageNet 预训练权重 (MAE格式)，绝对不能加载之前的跟踪模型
   # 请确保你下载了官方的 hivit_base_224.pth (或 mae_pretrain_vit_base.pth)
-  PRETRAIN_FILE: hivit_base_224.pth
+  PRETRAIN_FILE: "/root/autodl-tmp/ostrack-hivit/pretrained_models/hivit_base_224.pth"
 
 TRAIN:
-  LR: 0.0004
+  LR: 0.00005
   WEIGHT_DECAY: 0.0001
-  EPOCH: 300                      # 【修改4】全量冲刺必须跑满 300 轮 (原 10 轮根本不够收敛)
-  LR_DROP_EPOCH: 240              # 在第 240 轮降低学习率
+  EPOCH: 60                      # 【修改4】全量冲刺必须跑满 300 轮 (原 10 轮根本不够收敛)
+  LR_DROP_EPOCH: 45              # 在第 240 轮降低学习率
   BATCH_SIZE: 32                  # 4090D 显存大，32 是安全且高效的
   NUM_WORKER: 10                  # 【建议】4090D 计算太快，CPU读图需跟上，建议设为 8-10
   OPTIMIZER: ADAMW
@@ -57,7 +57,7 @@ TRAIN:
   L1_WEIGHT: 5.0
   GRAD_CLIP_NORM: 0.1
   PRINT_INTERVAL: 50
-  VAL_EPOCH_INTERVAL: 20
+  VAL_EPOCH_INTERVAL: 10
   AMP: False                       # 保持开启，4090D 跑 FP16 飞快
   DROP_PATH_RATE: 0.1
   SCHEDULER:
