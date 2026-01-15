@@ -92,50 +92,66 @@ def build_ostrack(cfg, training=True):
 
     # 2. 加载 ImageNet 预训练权重 (关键)
     if cfg.MODEL.PRETRAIN_FILE and training:
-        # Phase 1 加载的是 hivit_base_224.pth
         ckpt_path = cfg.MODEL.PRETRAIN_FILE
         try:
-            print(f">>> [Phase 1] Loading ImageNet weights from: {ckpt_path}")
-            # weights_only=False 解决 PyTorch 版本问题
+            print(f">>> [Phase 1] Loading weights from: {ckpt_path}")
             checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
 
+            # --- 【核心修复】深度解析嵌套的 state_dict ---
             if 'model' in checkpoint:
                 state_dict = checkpoint['model']
             elif 'net' in checkpoint:
                 state_dict = checkpoint['net']
+            elif 'module' in checkpoint and isinstance(checkpoint['module'], dict):
+                # 针对你当前文件的特殊处理
+                state_dict = checkpoint['module']
             else:
                 state_dict = checkpoint
 
-                # --- ostrack.py 中的 build_ostrack 修正片段 ---
-
-            # 适配 ImageNet 权重 key (核心：处理 8 个 block 的偏移)
+            # --- 修正后的自适应加载逻辑 ---
             backbone_dict = backbone.state_dict()
             new_dict = {}
-            for k, v in state_dict.items():
-                k_clean = k.replace('module.', '')
 
-                # 处理核心 Transformer blocks 的偏移映射
+            # 1. 自动检测权重类型
+            max_ckpt_idx = -1
+            for k in state_dict.keys():
+                if 'blocks.' in k:
+                    parts = k.split('blocks.')[1].split('.')
+                    if parts[0].isdigit():
+                        max_ckpt_idx = max(max_ckpt_idx, int(parts[0]))
+
+            # 如果最大索引超过 24，说明是原生 HiViT 权重(32层)，不需要偏移
+            # 如果最大索引是 23，说明是标准 ViT 权重(24层)，需要 +8 偏移
+            offset = 8 if max_ckpt_idx < 25 else 0
+            print(f">>> [Debug] Max block index in ckpt: {max_ckpt_idx}, using offset: {offset}")
+
+            for k, v in state_dict.items():
+                # 清理前缀
+                k_clean = k.replace('module.', '').replace('backbone.', '').replace('model.', '').replace('visual.',
+                                                                                                          '')
+
                 if k_clean.startswith('blocks.'):
                     parts = k_clean.split('.')
-                    idx = int(parts[1])
-                    # 将官方 0-23 映射到 8-31
-                    new_idx = idx + 8
-                    k_mapped = k_clean.replace(f'blocks.{idx}', f'blocks.{new_idx}')
+                    try:
+                        idx = int(parts[1])
+                        new_idx = idx + offset  # 应用自适应偏移
+                        k_mapped = k_clean.replace(f'blocks.{idx}', f'blocks.{new_idx}')
 
-                    if k_mapped in backbone_dict and v.shape == backbone_dict[k_mapped].shape:
-                        new_dict[k_mapped] = v
-
-                # 处理其他非 block 权重（如 patch_embed, pos_embed）
+                        if k_mapped in backbone_dict and v.shape == backbone_dict[k_mapped].shape:
+                            new_dict[k_mapped] = v
+                    except:
+                        continue
                 elif k_clean in backbone_dict and v.shape == backbone_dict[k_clean].shape:
                     new_dict[k_clean] = v
 
             msg = backbone.load_state_dict(new_dict, strict=False)
-            print(f">>> [Phase 1] Loaded {len(new_dict)} keys into Backbone. (Mapped Stage 3)")
-            # 此时 Missing keys 应该只剩下 blocks.0 到 blocks.7
+            print(f">>> [Phase 1] Smart Load: {len(new_dict)} keys matched.")
+
+            if len(new_dict) == 0:
+                print(">>> [Critical Warning] Still 0 keys matched! Check key format manually.")
 
         except Exception as e:
-            print(f">>> [Error] Failed to load ImageNet weights: {e}")
-            # Phase 1 如果加载不到预训练权重是致命的，这里抛出异常
+            print(f">>> [Error] Failed to load weights: {e}")
             raise e
 
     # 3. 构建 Head & Model
